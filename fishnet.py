@@ -18,6 +18,8 @@ la plus proche, ce qui suppose un maillage fermé, bien orienté (normales
 vers l'extérieur) et raisonnablement convexe (sphère, cylindre…).
 """
 
+from dataclasses import dataclass
+
 import numpy as np
 
 
@@ -40,6 +42,22 @@ class MeshSurface:
         """Indices des faces pouvant contenir un point à moins de `radius` de `center`."""
         dist = np.linalg.norm(self.centroids - center, axis=1)
         return np.nonzero(dist <= radius + self.face_radius)[0]
+
+    def top_point(self, x, y):
+        """Point le plus haut du maillage sur la verticale (x, y), ou None."""
+        a, b, c = self.a[:, :2], self.b[:, :2], self.c[:, :2]
+        p = np.array([x, y])
+        # Coordonnées barycentriques de (x, y) dans la projection de chaque face.
+        det = (b[:, 1] - c[:, 1]) * (a[:, 0] - c[:, 0]) + (c[:, 0] - b[:, 0]) * (a[:, 1] - c[:, 1])
+        with np.errstate(divide="ignore", invalid="ignore"):
+            l1 = ((b[:, 1] - c[:, 1]) * (p[0] - c[:, 0]) + (c[:, 0] - b[:, 0]) * (p[1] - c[:, 1])) / det
+            l2 = ((c[:, 1] - a[:, 1]) * (p[0] - c[:, 0]) + (a[:, 0] - c[:, 0]) * (p[1] - c[:, 1])) / det
+            l3 = 1 - l1 - l2
+            z = l1 * self.a[:, 2] + l2 * self.b[:, 2] + l3 * self.c[:, 2]
+        hit = (det != 0) & (l1 >= 0) & (l2 >= 0) & (l3 >= 0)
+        if not hit.any():
+            return None
+        return np.array([x, y, np.max(z[hit])])
 
     def closest_point(self, points, face_idx=None):
         """Point le plus proche sur le maillage et normale de la face correspondante.
@@ -178,15 +196,37 @@ def _fishnet_node(surface, a, b, c, spacing):
     return np.full(3, np.nan) if q is None else q
 
 
-def drape(vertices, faces, shape, spacing, start=None, warp_direction=(1.0, 0.0, 0.0)):
+@dataclass
+class Step:
+    """Pose d'une ligne du tissu le long de l'axe X (axe 0) : la colonne P[:, j]."""
+
+    line: int
+    phase: str
+
+
+def drape(
+    vertices,
+    faces,
+    shape,
+    spacing,
+    start=None,
+    warp_direction=(1.0, 0.0, 0.0),
+    return_history=False,
+):
     """Drape une grille de tissu `shape` = (N, M) sur le maillage.
 
     vertices, faces : maillage de l'objet (V×3, F×3).
     spacing         : distance entre deux nœuds voisins du tissu.
     start           : point de départ (projeté sur la surface) ; par défaut le
-                      point au-dessus du centre de la boîte englobante,
-                      projeté sur le haut de l'objet.
+                      point le plus haut de l'objet à la verticale du centre
+                      de sa boîte englobante.
     warp_direction  : direction des fils de chaîne (axe 0 de la grille) au départ.
+    return_history  : renvoie aussi la liste des `Step`, une par ligne, dans
+                      l'ordre de pose.
+
+    Le tissu est construit ligne par ligne le long de son axe X (axe 0 de la
+    grille, fils de chaîne) : d'abord la ligne centrale P[:, jc], puis les
+    lignes jc+1 … M-1, puis jc-1 … 0. Chaque ligne s'appuie sur la précédente.
 
     Renvoie un array (N, M, 3) ; NaN pour les nœuds qui n'ont pas pu être posés.
     """
@@ -194,33 +234,44 @@ def drape(vertices, faces, shape, spacing, start=None, warp_direction=(1.0, 0.0,
     n, m = shape
     ic, jc = n // 2, m // 2
     P = np.full((n, m, 3), np.nan)
+    history = []
 
     if start is None:
         lo, hi = surface.vertices.min(axis=0), surface.vertices.max(axis=0)
-        start = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, hi[2]]
+        center = (lo + hi) / 2
+        start = surface.top_point(center[0], center[1])
+        if start is None:
+            start = [center[0], center[1], hi[2]]
     p0, normal = surface.closest_point(np.asarray(start, dtype=float))
     p0, normal = p0[0], normal[0]
-    P[ic, jc] = p0
 
     warp = np.asarray(warp_direction, dtype=float)
     warp = _unit(warp - np.dot(warp, normal) * normal)
     weft = np.cross(normal, warp)
 
-    # Fils générateurs.
+    # Ligne centrale : fil de chaîne générateur le long de l'axe X.
+    P[ic, jc] = p0
     P[ic + 1:, jc] = _geodesic_line(surface, p0, warp, spacing, n - 1 - ic)
     P[:ic, jc] = _geodesic_line(surface, p0, -warp, spacing, ic)[::-1]
-    P[ic, jc + 1:] = _geodesic_line(surface, p0, weft, spacing, m - 1 - jc)
-    P[ic, :jc] = _geodesic_line(surface, p0, -weft, spacing, jc)[::-1]
+    history.append(Step(jc, "ligne centrale (générateur)"))
 
-    # Remplissage des quatre quadrants en s'éloignant des générateurs.
-    for di in (1, -1):
-        for dj in (1, -1):
-            for i in range(ic + di, n if di > 0 else -1, di):
-                for j in range(jc + dj, m if dj > 0 else -1, dj):
+    # Fil de trame générateur : il donne le nœud central (ic, j) de chaque ligne.
+    spine = {
+        1: _geodesic_line(surface, p0, weft, spacing, m - 1 - jc),
+        -1: _geodesic_line(surface, p0, -weft, spacing, jc),
+    }
+
+    # Lignes suivantes : nœud central puis propagation vers les deux bouts.
+    for dj in (1, -1):
+        for k, j in enumerate(range(jc + dj, m if dj > 0 else -1, dj)):
+            P[ic, j] = spine[dj][k]
+            for di in (1, -1):
+                for i in range(ic + di, n if di > 0 else -1, di):
                     P[i, j] = _fishnet_node(
                         surface, P[i - di, j], P[i, j - dj], P[i - di, j - dj], spacing
                     )
-    return P
+            history.append(Step(j, f"ligne côté {'+' if dj > 0 else '−'}"))
+    return (P, history) if return_history else P
 
 
 def shear_angles(P):

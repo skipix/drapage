@@ -1,4 +1,4 @@
-"""Démo : drapé fishnet d'un tissu sur une sphère et sur un cylindre."""
+"""Démo : drapé fishnet d'un tissu sur une sphère, un cylindre et un cylindre en U."""
 
 import time
 
@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from fishnet import drape, shear_angles
-from meshes import cylinder_mesh, sphere_mesh
+from meshes import bent_cylinder_mesh, cylinder_mesh, sphere_mesh
 
 
 def report(name, P, spacing):
@@ -38,14 +38,15 @@ def main():
     cases = [
         ("sphère", *sphere_mesh(radius=1.0), (21, 21), 0.1),
         ("cylindre", *cylinder_mesh(radius=1.0, height=4.0), (25, 25), 0.12),
+        ("cylindre en U", *bent_cylinder_mesh(radius=1.0, length=4.0, bend_radius=6.0), (25, 25), 0.12),
     ]
-    fig = plt.figure(figsize=(12, 6))
+    fig = plt.figure(figsize=(18, 6))
     for k, (name, vertices, faces, shape, spacing) in enumerate(cases):
         t0 = time.perf_counter()
         P = drape(vertices, faces, shape, spacing)
         print(f"[{name}] {time.perf_counter() - t0:.1f} s, sortie {P.shape}")
         report(name, P, spacing)
-        plot(fig.add_subplot(1, 2, k + 1, projection="3d"), vertices, faces, P, name)
+        plot(fig.add_subplot(1, len(cases), k + 1, projection="3d"), vertices, faces, P, name)
     fig.tight_layout()
     fig.savefig("drape.png", dpi=120)
     print("image : drape.png")

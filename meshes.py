@@ -49,3 +49,34 @@ def cylinder_mesh(radius=1.0, height=4.0, n_theta=80, n_h=40):
         faces.append([c0, idx(0, j), idx(0, j + 1)])
         faces.append([c1, idx(n_h, j + 1), idx(n_h, j)])
     return vertices, np.array(faces)
+
+
+def bent_cylinder_mesh(radius=1.0, length=4.0, bend_radius=6.0, n_theta=80, n_h=60):
+    """Cylindre fermé incurvé en U : son axe est un arc de cercle de rayon `bend_radius`.
+
+    L'axe part de l'origine selon x et ses extrémités remontent vers +z ;
+    `length` est la longueur de l'axe. Faces orientées vers l'extérieur.
+    """
+    half = length / (2 * bend_radius)                    # demi-angle de l'arc
+    t = np.linspace(-half, half, n_h + 1)
+    axis = np.stack([bend_radius * np.sin(t), np.zeros_like(t), bend_radius * (1 - np.cos(t))], -1)
+    up = np.stack([-np.sin(t), np.zeros_like(t), np.cos(t)], -1)   # vers le centre de courbure
+    side = np.array([0.0, 1.0, 0.0])
+    phi = np.linspace(0, 2 * np.pi, n_theta, endpoint=False)
+    ring = (np.sin(phi)[None, :, None] * side + np.cos(phi)[None, :, None] * up[:, None, :]) * radius
+    vertices = np.vstack([(axis[:, None, :] + ring).reshape(-1, 3), axis[0], axis[-1]])
+    c0, c1 = len(vertices) - 2, len(vertices) - 1
+
+    def idx(i, j):
+        return i * n_theta + (j % n_theta)
+
+    faces = []
+    for i in range(n_h):
+        for j in range(n_theta):
+            a, b = idx(i, j), idx(i, j + 1)
+            c, d = idx(i + 1, j), idx(i + 1, j + 1)
+            faces += [[a, c, d], [a, d, b]]
+    for j in range(n_theta):
+        faces.append([c0, idx(0, j), idx(0, j + 1)])
+        faces.append([c1, idx(n_h, j + 1), idx(n_h, j)])
+    return vertices, np.array(faces)
